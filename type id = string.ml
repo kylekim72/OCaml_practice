@@ -18,40 +18,42 @@ type liquid_ref =
   | Qual of logical_qualifier
   | And of liquid_ref * liquid_ref
 
-  (* Type Skeletons (T(B)) *)
+  (* Type Skeletons (T(B)) - Type Variable(\alpha) 제거 *)
 type 'r typ =
-  | TBase of id * base_type * 'r         (* {v: B | r} *)
+  | TBase of id * base_type * 'r         (* {\nu: B | r} *)
   | TFun  of id * 'r typ * 'r typ        (* x: T1 -> T2 *)
 
+(* Type Schema가 제거되었으므로 바로 타입 별칭을 정의할 수 있습니다. *)
 
-
-(* 3. Liquid type *)
+(* 3. Liquid 타입 (\hat{T}) *)
 type liquid_type = liquid_ref typ
 
 (* Expressions (e) without polymorphism *)
 type expr =
   | Var    of id                           (* x *)
   | Const  of const                        (* c *)
-  | Fun    of id * liquid_type * expr      (* lambda x.e , assume the type of the function is given*)
+  | Fun    of id * liquid_type * expr      (* lambda x.e , assume a type of the function is given*)
   | App    of expr * expr                  (* e e *)
   | ITE     of expr * expr * expr           (* if e then e else e *)
   | Let    of id * expr * expr             (* let x = e in e *)
-  | LetRec of id * id * liquid_type * liquid_type * expr * expr (* let rec f = lambda x.e in e, assume the type of the function is given *)
+  | LetRec of id * id * liquid_type * liquid_type * expr * expr        (* let rec f = lambda x.e in e *)
+
 
 type env = {
-  bindings : (id * liquid_type) list;  (* mapping for identifier: type *)
+  bindings : (id * liquid_type) list;  (* bindings for identifier -> type *)
   guards   : expr list;                (* guard predicates *)
 }
 
-(* Return a type information of given variable in given type environment *)
+(* 1. 환경에서 변수 찾기 (아까 짠 LT-VAR에서 쓸 함수) *)
 let lookup_var (x : id) (gamma : env) : liquid_type option =
   List.assoc_opt x gamma.bindings
 
-(* 2. Add new bindings to type environment *)
+(* 2. 환경에 새로운 변수 바인딩 추가하기 (LT-FUN이나 LT-LET에서 씁니다) *)
 let add_binding (x : id) (t : liquid_type) (gamma : env) : env =
+  (* 'with' 키워드는 gamma를 복사하되, bindings 필드만 새로 업데이트하라는 뜻이야 *)
   { gamma with bindings = (x, t) :: gamma.bindings }
 
-(* 3. Add a new guard predicate to type environment *)
+(* 3. 환경에 새로운 가드 조건 추가하기 (LT-IF에서 쓸 핵심 함수!) *)
 let add_guard (cond : expr) (gamma : env) : env =
   { gamma with guards = cond :: gamma.guards }
 
@@ -85,9 +87,7 @@ let rec substitute_type (x : id) (e_val : expr) (t : liquid_type) : liquid_type 
 
 let rec type_check (gamma: env) (e: expr) : liquid_type = 
   match e with
-    (* LT-CONST *)
   | Const c -> ty_const c
-    (* LT-VAR*)
   | Var x -> (match lookup_var x gamma with
        | None -> 
            (* x is not defined yet*)
@@ -100,7 +100,6 @@ let rec type_check (gamma: env) (e: expr) : liquid_type =
        | Some (TFun _ as func_type) ->
            (* if it is function type, just return that function type *)
            func_type)
-    (* LT-IF*)
   | ITE (e1, e2, e3) -> let t1 = type_check gamma e1 in
         (match t1 with 
         | TBase (_, Bool, _) -> (* first premise*)
@@ -112,22 +111,16 @@ let rec type_check (gamma: env) (e: expr) : liquid_type =
             let not_e1 = App (Var "not", e1) in
             let gamma_else = add_guard not_e1 gamma in
             let t3 = type_check gamma_else e3 in
-
             (* return type is same with t2*)
-            (* Missing part: subtype checking*)
             t2
             | _ -> failwith ("Type error"))
-    (* LT-FUN *)
   | Fun (x, t_x, e) -> let gamma_body = add_binding x t_x gamma in 
                    let t_body = type_check gamma_body e in
                    TFun (x, t_x, t_body)
-
-    (* LT-Let *)
   | Let (x, e1, e2) -> let s1 = type_check gamma e1 in
                    let new_gamma = add_binding x s1 gamma in
                    let t2 = type_check new_gamma e2 in
                    t2
-    (* LT-APP *)
   | App (e1, e2) -> let t1 = type_check gamma e1 in
                  (match t1 with 
                  | TFun(x, t_x, t_ret) ->
@@ -135,15 +128,11 @@ let rec type_check (gamma: env) (e: expr) : liquid_type =
                   (* [e2 / x] *)
                   substitute_type x e2 t_ret
                  | _ -> failwith ("Type error"))
-
-    (* There is no corresponding rule to LetRec in Liquid Type paper(PLDI 2008)*)
   | LetRec (f, x, t_f, t_x, e1, e2) -> 
-                  let gamma_f = add_binding f t_f gamma in (* add function's type to type environment*)
-                  let gamma_x = add_binding x t_x gamma_f in (* add function & parameter's type to type enviroment*)
-                  let t1 = type_check gamma_x e1 in 
+                  let gamma_f = add_binding f t_f gamma in
+                  let gamma_x = add_binding x t_x gamma_f in
+                  let t1 = type_check gamma_x e1 in
 
                   let t2 = type_check gamma_f e2 in 
 
                   t2
-
-(* Missing parts: substitution, subtype checking, *)
