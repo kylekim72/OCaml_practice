@@ -11,79 +11,261 @@ type const =
   | Bool of bool
 
 (* Liquid Refinements (Q) *)
-type logical_qualifier = string
+type simple_expr = 
+  | Ident of string
+  | NumConst of int
+  | BoolConst of bool
+  
+type predicate = 
+  | BoolConst of bool
+  | Eq of simple_expr * simple_expr
+  | Lt of simple_expr * simple_expr
+  | Gt of simple_expr * simple_expr
+  | And of predicate * predicate
+  | Or of predicate * predicate
+  | Not of predicate
 
-type liquid_ref =
-  | True
-  | Qual of logical_qualifier
-  | And of liquid_ref * liquid_ref
+type type_refinement = predicate
 
   (* Type Skeletons (T(B)) *)
-type 'r typ =
-  | TBase of id * base_type * 'r         (* {v: B | r} *)
-  | TFun  of id * 'r typ * 'r typ        (* x: T1 -> T2 *)
+type typ =
+  | TBase of id * base_type * type_refinement         (* {v: B | r} *)
+  | TFun  of id *  typ * typ        (* x: T1 -> T2 *)
 
-
-
-(* 3. Liquid type *)
-type liquid_type = liquid_ref typ
 
 (* Expressions (e) without polymorphism *)
 type expr =
   | Var    of id                           (* x *)
   | Const  of const                        (* c *)
-  | Fun    of id * liquid_type * expr      (* lambda x.e , assume the type of the function is given*)
+  | Fun    of id * typ * expr      (* lambda x.e , assume the type of the function is given*)
   | App    of expr * expr                  (* e e *)
   | ITE     of expr * expr * expr           (* if e then e else e *)
   | Let    of id * expr * expr             (* let x = e in e *)
-  | LetRec of id * id * liquid_type * liquid_type * expr * expr (* let rec f = lambda x.e in e, assume the type of the function is given *)
+  | LetRec of id * id * typ * typ * expr * expr (* let rec f = lambda x.e in e, assume the type of the function is given *)
 
 type env = {
-  bindings : (id * liquid_type) list;  (* mapping for identifier: type *)
+  bindings : (id * typ) list;  (* mapping for identifier: type *)
   guards   : expr list;                (* guard predicates *)
 }
 
 (* Return a type information of given variable in given type environment *)
-let lookup_var (x : id) (gamma : env) : liquid_type option =
+let lookup_var (x : id) (gamma : env) : typ option =
   List.assoc_opt x gamma.bindings
 
 (* 2. Add new bindings to type environment *)
-let add_binding (x : id) (t : liquid_type) (gamma : env) : env =
+let add_binding (x : id) (t : typ) (gamma : env) : env =
   { gamma with bindings = (x, t) :: gamma.bindings }
 
 (* 3. Add a new guard predicate to type environment *)
 let add_guard (cond : expr) (gamma : env) : env =
   { gamma with guards = cond :: gamma.guards }
 
-let ty_const (c: const) : liquid_type = 
+let ty_const (c: const) : typ = 
   match c with
-  | Int n -> TBase ("v", Int, Qual ("v = " ^ string_of_int n))
-  | Bool true -> TBase ("v", Bool, Qual ("v"))
-  | Bool false -> TBase ("v", Bool, Qual ("not v"))
+  | Int n -> 
+      (* {v: Int | v = n} *)
+      TBase ("v", Int, Eq (Ident "v", NumConst n))
+  | Bool b -> 
+      (* {v: Bool | v = true} or {v: Bool | v = false} *)
+      TBase ("v", Bool, Eq (Ident "v", BoolConst b))
 
 
-(* Not implemented for simplicity *)
-let rec substitute_ref (x: id) (e_val: expr) (ref: liquid_ref) : liquid_ref = 
-  ref
 
-let rec substitute_type (x : id) (e_val : expr) (t : liquid_type) : liquid_type =
+(* 1. expr을 predicate에 넣을 수 있는 simple_expr로 변환하는 헬퍼 함수 *)
+let expr_to_simple (e: expr) : simple_expr option =
+  match e with
+  | Var x -> Some (Ident x)
+  | Const (Int n) -> Some (NumConst n)
+  | Const (Bool b) -> Some (BoolConst b)
+  (* 복잡한 수식이나 함수 호출은 조건식(predicate) 안에 들어갈 수 없음! *)
+  | _ -> None 
+
+(* 2. simple_expr 내부의 변수를 치환하는 함수 *)
+let rec substitute_simple (x: id) (s_val: simple_expr) (s: simple_expr) : simple_expr =
+  match s with
+  | Ident y when y = x -> s_val
+  | _ -> s
+
+(* 3. predicate 내부를 치환하는 함수 (예전의 substitute_ref) *)
+let rec substitute_predicate (x: id) (s_val: simple_expr) (p: predicate) : predicate =
+  match p with
+  | BoolConst _ -> p
+  | Eq (s1, s2) -> Eq (substitute_simple x s_val s1, substitute_simple x s_val s2)
+  | Lt (s1, s2) -> Lt (substitute_simple x s_val s1, substitute_simple x s_val s2)
+  | Gt (s1, s2) -> Gt (substitute_simple x s_val s1, substitute_simple x s_val s2)
+  | And (p1, p2) -> And (substitute_predicate x s_val p1, substitute_predicate x s_val p2)
+  | Or (p1, p2) -> Or (substitute_predicate x s_val p1, substitute_predicate x s_val p2)
+  | Not p1 -> Not (substitute_predicate x s_val p1)
+
+(* 4. 대망의 substitute_type 함수 업데이트 *)
+let rec substitute_type (x : id) (e_val : expr) (t : typ) : typ =
+  (* e_val을 simple_expr로 변환 시도 *)
+  let s_val_opt = expr_to_simple e_val in
+
   match t with
-  | TBase (v, base_t, ref) -> 
-    if v = x then
-      t
-    else
-      let new_ref = substitute_ref x e_val ref in
-      TBase (v, base_t, new_ref)
+  | TBase (v, base_t, ref_pred) -> 
+      if v = x then
+        t (* 변수 가려짐(Shadowing): 치환 중단 *)
+      else
+        let new_ref = match s_val_opt with
+          | Some s_val -> substitute_predicate x s_val ref_pred
+          | None -> ref_pred (* 단순 변환이 불가능한 복잡한 expr이면 치환하지 않음 *)
+        in
+        TBase (v, base_t, new_ref)
+
   | TFun (y, t_in, t_out) -> 
-    let new_t_in = substitute_type x e_val t_in in
-    if y = x then
-      TFun (y, new_t_in, t_out)
-    else
-      let new_t_out = substitute_type x e_val t_out in
-      TFun (y, new_t_in, new_t_out)
+      let new_t_in = substitute_type x e_val t_in in
+      if y = x then
+        TFun (y, new_t_in, t_out)
+      else
+        let new_t_out = substitute_type x e_val t_out in
+        TFun (y, new_t_in, new_t_out)
+
+(* 1. simple_expr to smt-lib *)
+let rec smt_of_simple (s: simple_expr) : string =
+  match s with
+  | Ident x -> x
+  | NumConst n -> string_of_int n
+  | BoolConst b -> if b then "true" else "false"
+
+(* 2. predicate to smt-lib *)
+let rec smt_of_pred (p: predicate) : string =
+  match p with
+  | BoolConst true -> "true"
+  | BoolConst false -> "false"
+  | Eq (s1, s2) -> Printf.sprintf "(= %s %s)" (smt_of_simple s1) (smt_of_simple s2)
+  | Lt (s1, s2) -> Printf.sprintf "(< %s %s)" (smt_of_simple s1) (smt_of_simple s2)
+  | Gt (s1, s2) -> Printf.sprintf "(> %s %s)" (smt_of_simple s1) (smt_of_simple s2)
+  | And (p1, p2) -> Printf.sprintf "(and %s %s)" (smt_of_pred p1) (smt_of_pred p2)
+  | Or (p1, p2) -> Printf.sprintf "(or %s %s)" (smt_of_pred p1) (smt_of_pred p2)
+  | Not p1 -> Printf.sprintf "(not %s)" (smt_of_pred p1)
+
+(* 문자열 Set 모듈 생성 *)
+module StringSet = Set.Make(String)
+
+(* simple_expr에서 변수 추출 *)
+let rec fv_simple (s: simple_expr) : StringSet.t =
+  match s with
+  | Ident x -> StringSet.singleton x
+  | _ -> StringSet.empty
+
+(* predicate에서 변수 추출 *)
+let rec fv_pred (p: predicate) : StringSet.t =
+  match p with
+  | BoolConst _ -> StringSet.empty
+  | Eq (s1, s2) | Lt (s1, s2) | Gt (s1, s2) -> 
+      StringSet.union (fv_simple s1) (fv_simple s2)
+  | And (p1, p2) | Or (p1, p2) -> 
+      StringSet.union (fv_pred p1) (fv_pred p2)
+  | Not p1 -> fv_pred p1
+
+(* SMT 솔버를 실행하여 Implication(p1 => p2)이 참인지 확인하는 함수 *)
+(* 매개변수 추가: gamma(환경), base_var(기준 변수명), base_t(기준 변수 타입) *)
+let check_implication (gamma: env) (base_var: id) (base_t: base_type) 
+                      (gamma_preds: predicate list) (p1: predicate) (p2: predicate) : bool =
+  
+  let all_preds = p1 :: p2 :: gamma_preds in
+  let fvs = List.fold_left (fun acc p -> 
+      StringSet.union acc (fv_pred p)
+    ) StringSet.empty all_preds 
+  in
+
+  let script = Buffer.create 512 in
+
+  (* 3. 변수 선언 (Declare) - Int/Bool 완벽 체크 *)
+  StringSet.iter (fun v ->
+    let z3_type = 
+      if v = base_var then
+        (* 1) 검사 중인 타입의 기준 변수(v)인 경우 *)
+        match base_t with
+        | Int -> "Int"
+        | Bool -> "Bool"
+      else
+        (* 2) 환경(gamma)에 등록된 외부 변수인 경우 *)
+        match lookup_var v gamma with
+        | Some (TBase (_, Int, _)) -> "Int"
+        | Some (TBase (_, Bool, _)) -> "Bool"
+        | _ -> 
+            (* 함수 타입이거나 아예 없는 변수면 일단 Int로 Fallback (혹은 에러 처리) *)
+            "Int" 
+    in
+    Buffer.add_string script (Printf.sprintf "(declare-const %s %s)\n" v z3_type)
+  ) fvs;
+
+  (* 4. Assert gamma *)
+  List.iter (fun g_pred -> 
+    Buffer.add_string script (Printf.sprintf "(assert %s)\n" (smt_of_pred g_pred))
+  ) gamma_preds;
+
+  (* 5. Assert p1 *)
+  Buffer.add_string script (Printf.sprintf "(assert %s)\n" (smt_of_pred p1));
+
+  (* 6. Assert not p2 *)
+  Buffer.add_string script (Printf.sprintf "(assert (not %s))\n" (smt_of_pred p2));
+
+  Buffer.add_string script "(check-sat)\n";
+
+  let smt_query = Buffer.contents script in
+
+  (* 8. Run z3*)
+  let ic, oc = Unix.open_process "z3 -smt2 -in" in
+  output_string oc smt_query;
+  flush oc;
+  
+  let result = 
+    try input_line ic 
+    with End_of_file -> "unknown" 
+  in
+  ignore (Unix.close_process (ic, oc));
+
+  (* 9. unsat 확인 *)
+  result = "unsat"
+
+(* 환경(gamma)에 있는 변수들의 조건식을 predicate 리스트로 추출 *)
+let env_to_preds (gamma: env) : predicate list =
+  List.fold_left (fun acc (var_name, typ) ->
+    match typ with
+    | TBase (v, _, ref_pred) ->
+        (* 타입 내부 조건식의 기준 변수 v를, 실제 환경에 등록된 변수명 var_name으로 치환! *)
+        let actual_pred = substitute_predicate v (Ident var_name) ref_pred in
+        actual_pred :: acc
+    | TFun _ -> 
+        (* 함수 타입 자체는 1차 논리(SMT)로 직접 증명하기 어려우므로 제외합니다 *)
+        acc
+  ) [] gamma.bindings
+
+(* Check t1 <: t2 *)
+let rec is_subtype (gamma: env) (t1: typ) (t2: typ) : unit =
+  match t1, t2 with
+  (* 1. 기본 타입의 서브타이핑 *)
+  | TBase (v1, base_t1, ref1), TBase (v2, base_t2, ref2) ->
+      if base_t1 <> base_t2 then failwith "Base types do not match!"
+      else
+        let ref2_sub = substitute_predicate v2 (Ident v1) ref2 in
+        let gamma_preds = env_to_preds gamma in 
+        
+        (* 변경됨: gamma, v1, base_t1을 같이 넘겨줍니다! *)
+        let is_valid = check_implication gamma v1 base_t1 gamma_preds ref1 ref2_sub in
+        
+        if not is_valid then 
+          failwith "Subtype Error: SMT Solver cannot prove implication!"
+
+  (* 2. 함수 타입의 서브타이핑 *)
+  | TFun (x1, t_in1, t_out1), TFun (x2, t_in2, t_out2) ->
+      (* 입력 타입은 역방향 (Contravariance) *)
+      (* Check input type in opposite way*)
+      is_subtype gamma t_in2 t_in1;
+      
+      (* 출력 타입은 정방향 (Covariance). 
+         단, t_out1 안의 매개변수 x1을 x2로 치환해주고 검사해야 합니다! *)
+      let new_gamma = add_binding x2 t_in2 gamma in
+      let sub_t_out1 = substitute_type x1 (Var x2) t_out1 in
+      is_subtype new_gamma sub_t_out1 t_out2
+
+  | _ -> failwith "Subtyping Error: Type structure is different"
 
 
-let rec type_check (gamma: env) (e: expr) : liquid_type = 
+let rec type_check (gamma: env) (e: expr) : typ = 
   match e with
     (* LT-CONST *)
   | Const c -> ty_const c
@@ -95,7 +277,7 @@ let rec type_check (gamma: env) (e: expr) : liquid_type =
            
        | Some (TBase (v, base_t, _old_ref)) -> 
           (* if it's base type, just change the refinement predicate to v = x*)
-           TBase ("v", base_t, Qual ("v = " ^ x))
+           TBase ("v", base_t, Eq(Ident "v", Ident x))
            
        | Some (TFun _ as func_type) ->
            (* if it is function type, just return that function type *)
@@ -113,6 +295,8 @@ let rec type_check (gamma: env) (e: expr) : liquid_type =
             let gamma_else = add_guard not_e1 gamma in
             let t3 = type_check gamma_else e3 in
 
+            is_subtype gamma_else t3 t2;
+
             (* return type is same with t2*)
             (* Missing part: subtype checking*)
             t2
@@ -122,7 +306,7 @@ let rec type_check (gamma: env) (e: expr) : liquid_type =
                    let t_body = type_check gamma_body e in
                    TFun (x, t_x, t_body)
 
-    (* LT-Let *)
+    (* LT-LET *)
   | Let (x, e1, e2) -> let s1 = type_check gamma e1 in
                    let new_gamma = add_binding x s1 gamma in
                    let t2 = type_check new_gamma e2 in
@@ -133,10 +317,12 @@ let rec type_check (gamma: env) (e: expr) : liquid_type =
                  | TFun(x, t_x, t_ret) ->
                   let t2 = type_check gamma e2 in
                   (* [e2 / x] *)
+                  is_subtype gamma t2 t_x;
                   substitute_type x e2 t_ret
                  | _ -> failwith ("Type error"))
 
-    (* There is no corresponding rule to LetRec in Liquid Type paper(PLDI 2008)*)
+    (* There is no corresponding rule to LetRec in Liquid Type paper(PLDI 2008).
+      Therefore, I've implemented typechecking for LetRec as a variant of LT-LET rule*)
   | LetRec (f, x, t_f, t_x, e1, e2) -> 
                   let gamma_f = add_binding f t_f gamma in (* add function's type to type environment*)
                   let gamma_x = add_binding x t_x gamma_f in (* add function & parameter's type to type enviroment*)
@@ -147,3 +333,33 @@ let rec type_check (gamma: env) (e: expr) : liquid_type =
                   t2
 
 (* Missing parts: substitution, subtype checking, *)
+
+(* 1. 빈 타입 환경 생성 *)
+let empty_env = { bindings = []; guards = [] }
+
+(* 2. 양수만 받는 타입 정의: {v: Int | v > 0} *)
+let positive_int_type = 
+  TBase ("v", Int, Gt (Ident "v", NumConst 0))
+
+(* 3. 테스트할 프로그램 AST 조립 
+   코드 의미: (fun (x: positive_int) -> x) 3 
+*)
+let test_program = 
+  App (
+    Fun ("x", positive_int_type, Var "x"), (* 양수 x를 받아서 그대로 반환하는 함수 *)
+    Const (Int 1)                          (* 인자로 숫자 3을 넘김 *)
+  )
+
+(* 4. 실행 및 결과 출력 뼈대 *)
+let () =
+  print_endline "=== Liquid Type Checker Test Start ===";
+  try
+    let final_type = type_check empty_env test_program in
+    print_endline "Success";
+    (* OCaml 기본 출력으로 타입 구조 훔쳐보기 (옵션) *)
+    (* Printf.printf "최종 타입 구조: ...\n" *)
+  with 
+  | Failure msg -> 
+      Printf.printf "Fail: %s\n" msg
+  | e -> 
+      Printf.printf "Unknown error: %s\n" (Printexc.to_string e)
