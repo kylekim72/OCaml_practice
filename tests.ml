@@ -33,6 +33,34 @@ let initial_env = {
   guards = []
 }
 
+(* ========================================== *)
+(* A-Normal Form (ANF) 변환기                 *)
+(* ========================================== *)
+let anf_counter = ref 0
+let fresh_var () =
+  incr anf_counter;
+  "~t" ^ string_of_int !anf_counter
+
+let rec normalize (e: expr) (k: expr -> expr) : expr =
+  match e with
+  | Var _ | Const _ -> k e
+  | Fun (x, t_x, body) -> k (Fun (x, t_x, anf_transform body))
+  | Let (x, e1, e2) -> Let (x, anf_transform e1, normalize e2 k)
+  | LetRec (f, x, t_f, t_x, e1, e2) ->
+      LetRec (f, x, t_f, t_x, anf_transform e1, normalize e2 k)
+  | ITE (e1, e2, e3, target_t) ->
+      normalize e1 (fun v1 ->
+        let t_name = fresh_var () in
+        Let (t_name, ITE (v1, anf_transform e2, anf_transform e3, target_t), k (Var t_name)))
+  | App (e1, e2) ->
+      normalize e1 (fun v1 ->
+        normalize e2 (fun v2 ->
+          let t_name = fresh_var () in
+          Let (t_name, App (v1, v2), k (Var t_name)))) (* 💡 괄호 하나 추가됨! *)
+
+and anf_transform (e: expr) : expr =
+  normalize e (fun x -> x)
+
 (* ==================== 테스트 케이스 AST ==================== *)
 
 (* Test 1: (fun x -> x + 1) 5 *)
@@ -68,7 +96,7 @@ let test3_ast =
 
 (* Test 4: sum 함수 (재귀 불변성 증명) *)
 (* sum: k:{v>=0} -> {v>=0} *)
-(* let rec sum k = if k < 0 then 0 else let s = sum (k-1) in s + k *)
+(* let rec sum k = if k = 0 then 0 else k + sum (k-1) *)
 let test4_ast = 
   LetRec ("sum", "k", TFun("k", t_pos, t_pos), t_pos,
     ITE (
@@ -88,8 +116,13 @@ let test4_ast =
 (* ==================== 실행기 ==================== *)
 let run_test name ast =
   Printf.printf "▶ %s\n" name;
-  try let _ = type_check initial_env ast in Printf.printf "  ✅ Success!\n\n"
-  with Failure msg -> Printf.printf "  Fail: %s\n\n" msg
+  try 
+    (* 💡 타입 체커에 넣기 전에 ANF 변환! *)
+    let anf_ast = anf_transform ast in
+    
+    let _ = type_check initial_env anf_ast in 
+    Printf.printf "  Success!\n\n"
+  with Failure msg -> Printf.printf " Fail: %s\n\n" msg
 
 let () =
   print_endline "=== Liquid Types Core Test Suite ===";

@@ -155,6 +155,8 @@ module StringSet = Set.Make(String)
 let rec fv_simple (s: simple_expr) : StringSet.t =
   match s with
   | Ident x -> StringSet.singleton x
+  | Add (s1, s2) | Sub (s1, s2) -> 
+      StringSet.union (fv_simple s1) (fv_simple s2)
   | _ -> StringSet.empty
 
 (* predicate에서 변수 추출 *)
@@ -230,15 +232,17 @@ let check_implication (gamma: env) (base_var: id) (base_t: base_type)
   result = "unsat"
 
 let rec expr_to_pred (e: expr) : predicate =
-match e with
-| App(App(Var "<", e1), e2) -> 
-    (match expr_to_simple e1, expr_to_simple e2 with
-      | Some s1, Some s2 -> Lt (s1, s2) | _ -> failwith "Test Error")
-| App(App(Var ">", e1), e2) -> 
-    (match expr_to_simple e1, expr_to_simple e2 with
-      | Some s1, Some s2 -> Gt (s1, s2) | _ -> failwith "Test Error")
-| App(Var "not", e') -> Not (expr_to_pred e')
-| _ -> BoolConst true (* 기타 가드는 일단 통과 *)
+  match e with
+  | Var x -> Eq (Ident x, BoolConst true)
+  | App(Var "not", Var x) -> Eq (Ident x, BoolConst false)
+  | App(App(Var "<", e1), e2) -> 
+      (match expr_to_simple e1, expr_to_simple e2 with
+        | Some s1, Some s2 -> Lt (s1, s2) | _ -> failwith "Test Error")
+  | App(App(Var ">", e1), e2) -> 
+      (match expr_to_simple e1, expr_to_simple e2 with
+        | Some s1, Some s2 -> Gt (s1, s2) | _ -> failwith "Test Error")
+  | App(Var "not", e') -> Not (expr_to_pred e')
+  | _ -> BoolConst true (* 기타 가드는 일단 통과 *)
 
 (* 환경(gamma)에 있는 변수들의 조건식을 predicate 리스트로 추출 *)
 let env_to_preds (gamma: env) : predicate list =
@@ -327,10 +331,19 @@ let rec type_check (gamma: env) (e: expr) : typ =
                    TFun (x, t_x, t_body)
 
     (* LT-LET *)
-  | Let (x, e1, e2) -> let s1 = type_check gamma e1 in
-                   let new_gamma = add_binding x s1 gamma in
+  | Let (x, e1, e2) -> let t1 = type_check gamma e1 in
+                   let new_gamma = add_binding x t1 gamma in
                    let t2 = type_check new_gamma e2 in
-                   t2
+                   (match t1, t2 with
+                    | TBase (v1, b1, ref1), TBase (v2, b2, ref2) ->
+                        (* 1. e1의 결과 타입(ref1)에서 기준 변수 v1을 실제 변수명 x로 치환 *)
+                        let ref1_x = substitute_predicate v1 (Ident x) ref1 in
+                        
+                        (* 2. e2의 최종 결과 타입(ref2)에 x의 제약 조건을 영구적으로 결합! *)
+                        let combined_ref = And (ref1_x, ref2) in
+                        TBase (v2, b2, combined_ref)
+                        
+                    | _ -> t2)
     (* LT-APP *)
   | App (e1, e2) -> let t1 = type_check gamma e1 in
                  (match t1 with 
@@ -386,7 +399,7 @@ let test_program =
 let () =
   print_endline "=== Liquid Type Checker Test Start ===";
   try
-    let final_type = type_check empty_env test_program in
+    let _ = type_check empty_env test_program in
     print_endline "Success";
     (* OCaml 기본 출력으로 타입 구조 훔쳐보기 (옵션) *)
     (* Printf.printf "최종 타입 구조: ...\n" *)
