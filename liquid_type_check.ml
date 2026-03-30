@@ -15,6 +15,8 @@ type simple_expr =
   | Ident of string
   | NumConst of int
   | BoolConst of bool
+  | Add of simple_expr * simple_expr
+  | Sub of simple_expr * simple_expr  
   
 type predicate = 
   | BoolConst of bool
@@ -78,6 +80,8 @@ let expr_to_simple (e: expr) : simple_expr option =
   | Const (Int n) -> Some (NumConst n)
   | Const (Bool b) -> Some (BoolConst b)
   (* 복잡한 수식이나 함수 호출은 조건식(predicate) 안에 들어갈 수 없음! *)
+  (* This place needs A-normalization*)
+  (* If we do A-normalization, we need to return error here*)
   | _ -> None 
 
 (* 2. simple_expr 내부의 변수를 치환하는 함수 *)
@@ -275,9 +279,10 @@ let rec type_check (gamma: env) (e: expr) : typ =
            (* x is not defined yet*)
            failwith ("Unbound variable: " ^ x)
            
-       | Some (TBase (v, base_t, _old_ref)) -> 
-          (* if it's base type, just change the refinement predicate to v = x*)
-           TBase ("v", base_t, Eq(Ident "v", Ident x))
+       | Some (TBase (v, base_t, old_ref)) -> 
+           (* Conjunction with previous refinement *)
+           let new_ref = And (old_ref, Eq (Ident v, Ident x)) in
+           TBase (v, base_t, new_ref)
            
        | Some (TFun _ as func_type) ->
            (* if it is function type, just return that function type *)
@@ -347,7 +352,7 @@ let positive_int_type =
 let test_program = 
   App (
     Fun ("x", positive_int_type, Var "x"), (* 양수 x를 받아서 그대로 반환하는 함수 *)
-    Const (Int 1)                          (* 인자로 숫자 3을 넘김 *)
+    Const (Int 3)                          (* 인자로 숫자 3을 넘김 *)
   )
 
 (* 4. 실행 및 결과 출력 뼈대 *)
