@@ -27,6 +27,8 @@ let initial_env = {
     
     (* not: v가 true일 조건은 x가 true가 아님과 같다 *)
     ("not", TFun ("x", t_bool, TBase ("v", Bool, iff v_is_true (Not x_is_true))));
+
+    ("=", TFun ("x", t_int, TFun ("y", t_int, TBase ("v", Bool, iff v_is_true (Eq(Ident "x", Ident "y"))))));
   ];
   guards = []
 }
@@ -46,7 +48,8 @@ let test2_ast =
     ITE (
       App(App(Var "<", Var "x"), Const(Int 0)), 
       App(App(Var "-", Const(Int 0)), Var "x"),
-      Var "x"
+      Var "x",
+      t_pos
     )
   )
 
@@ -58,7 +61,8 @@ let test3_ast =
     ITE (
       App(App(Var ">", Var "x"), Var "y"), 
       Var "x", 
-      Var "y"
+      Var "y",
+      t_max
     )
   ))
 
@@ -68,12 +72,15 @@ let test3_ast =
 let test4_ast = 
   LetRec ("sum", "k", TFun("k", t_pos, t_pos), t_pos,
     ITE (
-      App(App(Var "<", Var "k"), Const(Int 0)),
+      App(App(Var "=", Var "k"), Const(Int 0)),
       Const (Int 0),
-      Let ("s", 
-           App (Var "sum", App(App(Var "-", Var "k"), Const(Int 1))),
-           App(App(Var "+", Var "s"), Var "k")
-      )
+      
+      (* k + sum (k - 1) *)
+      App (
+        App (Var "+", Var "k"), 
+        App (Var "sum", App (App (Var "-", Var "k"), Const (Int 1)))
+      ),
+      t_pos
     ),
     App (Var "sum", Const (Int 5)) (* 본문 실행: sum 5 *)
   )
