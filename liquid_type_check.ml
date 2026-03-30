@@ -41,7 +41,7 @@ type expr =
   | Const  of const                        (* c *)
   | Fun    of id * typ * expr      (* lambda x.e , assume the type of the function is given*)
   | App    of expr * expr                  (* e e *)
-  | ITE     of expr * expr * expr           (* if e then e else e *)
+  | ITE of expr * expr * expr * typ          (* if e then e else e *)
   | Let    of id * expr * expr             (* let x = e in e *)
   | LetRec of id * id * typ * typ * expr * expr (* let rec f = lambda x.e in e, assume the type of the function is given *)
 
@@ -82,12 +82,14 @@ let expr_to_simple (e: expr) : simple_expr option =
   (* 복잡한 수식이나 함수 호출은 조건식(predicate) 안에 들어갈 수 없음! *)
   (* This place needs A-normalization*)
   (* If we do A-normalization, we need to return error here*)
-  | _ -> None 
+  | _ -> failwith "Compiler Bug: Missing ANF normalization"
 
 (* 2. simple_expr 내부의 변수를 치환하는 함수 *)
 let rec substitute_simple (x: id) (s_val: simple_expr) (s: simple_expr) : simple_expr =
   match s with
   | Ident y when y = x -> s_val
+  | Add (s1, s2) -> Add (substitute_simple x s_val s1, substitute_simple x s_val s2)
+  | Sub (s1, s2) -> Sub (substitute_simple x s_val s1, substitute_simple x s_val s2)
   | _ -> s
 
 (* 3. predicate 내부를 치환하는 함수 (예전의 substitute_ref) *)
@@ -131,6 +133,8 @@ let rec smt_of_simple (s: simple_expr) : string =
   | Ident x -> x
   | NumConst n -> string_of_int n
   | BoolConst b -> if b then "true" else "false"
+  | Add (s1, s2) -> Printf.sprintf "(+ %s %s)" (smt_of_simple s1) (smt_of_simple s2)
+  | Sub (s1, s2) -> Printf.sprintf "(- %s %s)" (smt_of_simple s1) (smt_of_simple s2)
 
 (* 2. predicate to smt-lib *)
 let rec smt_of_pred (p: predicate) : string =
@@ -225,18 +229,30 @@ let check_implication (gamma: env) (base_var: id) (base_t: base_type)
   (* 9. unsat 확인 *)
   result = "unsat"
 
+let rec expr_to_pred (e: expr) : predicate =
+match e with
+| App(App(Var "<", e1), e2) -> 
+    (match expr_to_simple e1, expr_to_simple e2 with
+      | Some s1, Some s2 -> Lt (s1, s2) | _ -> failwith "Test Error")
+| App(App(Var ">", e1), e2) -> 
+    (match expr_to_simple e1, expr_to_simple e2 with
+      | Some s1, Some s2 -> Gt (s1, s2) | _ -> failwith "Test Error")
+| App(Var "not", e') -> Not (expr_to_pred e')
+| _ -> BoolConst true (* 기타 가드는 일단 통과 *)
+
 (* 환경(gamma)에 있는 변수들의 조건식을 predicate 리스트로 추출 *)
 let env_to_preds (gamma: env) : predicate list =
-  List.fold_left (fun acc (var_name, typ) ->
+  let bind_preds = List.fold_left (fun acc (var_name, typ) ->
     match typ with
     | TBase (v, _, ref_pred) ->
-        (* 타입 내부 조건식의 기준 변수 v를, 실제 환경에 등록된 변수명 var_name으로 치환! *)
         let actual_pred = substitute_predicate v (Ident var_name) ref_pred in
         actual_pred :: acc
-    | TFun _ -> 
-        (* 함수 타입 자체는 1차 논리(SMT)로 직접 증명하기 어려우므로 제외합니다 *)
-        acc
-  ) [] gamma.bindings
+    | TFun _ -> acc
+  ) [] gamma.bindings in
+  
+  (* guards에 있는 expr들도 전부 predicate로 변환해서 합칩니다! *)
+  let guard_preds = List.map expr_to_pred gamma.guards in
+  bind_preds @ guard_preds
 
 (* Check t1 <: t2 *)
 let rec is_subtype (gamma: env) (t1: typ) (t2: typ) : unit =
@@ -288,24 +304,23 @@ let rec type_check (gamma: env) (e: expr) : typ =
            (* if it is function type, just return that function type *)
            func_type)
     (* LT-IF*)
-  | ITE (e1, e2, e3) -> let t1 = type_check gamma e1 in
-        (match t1 with 
-        | TBase (_, Bool, _) -> (* first premise*)
+  | ITE (e1, e2, e3, target_typ) -> 
+      let t1 = type_check gamma e1 in
+      (match t1 with 
+       | TBase (_, Bool, _) -> 
+           let gamma_then = add_guard e1 gamma in
+           let t2 = type_check gamma_then e2 in
+           
+           let not_e1 = App (Var "not", e1) in
+           let gamma_else = add_guard not_e1 gamma in
+           let t3 = type_check gamma_else e3 in
 
-            (* second premise*)
-            let gamma_then = add_guard e1 gamma in
-            let t2 = type_check gamma_then e2 in
-            (* third premise*)
-            let not_e1 = App (Var "not", e1) in
-            let gamma_else = add_guard not_e1 gamma in
-            let t3 = type_check gamma_else e3 in
+           (* [핵심 수정] then과 else가 각각 목표 타입(target_typ)의 서브타입인지 독립적으로 검사! *)
+           is_subtype gamma_then t2 target_typ;
+           is_subtype gamma_else t3 target_typ;
 
-            is_subtype gamma_else t3 t2;
-
-            (* return type is same with t2*)
-            (* Missing part: subtype checking*)
-            t2
-            | _ -> failwith ("Type error"))
+           target_typ
+       | _ -> failwith "Type error: Condition need to be boolean.")
     (* LT-FUN *)
   | Fun (x, t_x, e) -> let gamma_body = add_binding x t_x gamma in 
                    let t_body = type_check gamma_body e in
@@ -333,9 +348,21 @@ let rec type_check (gamma: env) (e: expr) : typ =
                   let gamma_x = add_binding x t_x gamma_f in (* add function & parameter's type to type enviroment*)
                   let t1 = type_check gamma_x e1 in 
 
-                  let t2 = type_check gamma_f e2 in 
+                  (match t_f with
+                  | TFun (y, _, t_ret) ->
+                      (* 팁: t_f에 선언된 매개변수 이름(y)이 실제 구현의 매개변수(x)와 
+                          다를 수 있으므로, 반환 타입 내부의 y를 x로 치환한 뒤 검사합니다. *)
+                      let expected_ret = substitute_type y (Var x) t_ret in
+                      
+                      (* 본문 타입(t1)이 기대하는 반환 타입(expected_ret)의 서브타입인가? *)
+                      is_subtype gamma_x t1 expected_ret;
+                      
+                      (* 무사히 통과했다면 나머지 e2를 마저 검사합니다 *)
+                      let t2 = type_check gamma_f e2 in 
+                      t2
+                      
+                  | _ -> failwith "Type error: Type of LetRec should be TFun!")
 
-                  t2
 
 (* Missing parts: substitution, subtype checking, *)
 
